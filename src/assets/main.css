@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+/* Mendaftarkan warna custom GoTik */
+@theme {
+  --color-gotik-dark: #0a0a0a;
+  --color-gotik-card: #1c1c1e;
+  --color-gotik-yellow: #ffb800;
+}
+
+/* Base style untuk body */
+body {
+  background-color: var(--color-gotik-dark);
+  color: white;
+  margin: 0;
+  font-family: 'Inter', sans-serif;
+}
