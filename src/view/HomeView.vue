@@ -27,6 +27,7 @@ const eventData = ref({
   cover: 'https://go-tik.com/storage/cover/_1773939956_IMG_9883.jpeg'
 })
 
+
 const fetchEventData = async () => {
   try {
     const response = await api.get('/listEvent')
@@ -47,7 +48,7 @@ const fetchEventData = async () => {
     console.error('Fetch event error:', error)
   }
 }
-
+console.log(eventData.value.uid)
 const currentUser = ref({
   name: 'User',
   avatar: '',
@@ -80,7 +81,7 @@ const loadUserFromStorage = () => {
 
 onMounted(() => {
   loadUserFromStorage()
-  console.log(currentUser.value)
+  // console.log(currentUser.value)
   fetchEventData()
 })
 
