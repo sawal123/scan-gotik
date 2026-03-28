@@ -91,7 +91,7 @@ const handleVerify = async () => {
 }
 
 onMounted(() => {
-  fetchTicketDetail()
+  fetchTicketDetail()R
 })
 </script>
 

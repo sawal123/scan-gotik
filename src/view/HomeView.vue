@@ -48,7 +48,7 @@ const fetchEventData = async () => {
     console.error('Fetch event error:', error)
   }
 }
-console.log(eventData.value.uid)
+// console.log(eventData.value.uid)
 const currentUser = ref({
   name: 'User',
   avatar: '',

@@ -30,7 +30,7 @@ const fetchEventDetails = async () => {
     const result = response.data
     if (result.success && result.data) {
       const currentEvent = result.data.find((e: any) => e.uid === uid)
-      console.log(currentEvent)
+      // console.log(currentEvent)
       if (currentEvent) {
         ticketSold.value = currentEvent.tiket_terjual.toString()
         ticketVerified.value = currentEvent.tiket_terverifikasi.toString()
