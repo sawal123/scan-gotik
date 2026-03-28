@@ -35,13 +35,13 @@ const fetchTicketDetail = async () => {
   try {
     const response = await api.get(`/ticket/${uid}/detail`)
     const result = response.data
-    
+    console.log(result)
     if (result.success && result.data) {
       const td = result.data
       ticketData.value = {
         uid: uid as string,
         event: td.event_name,
-        image: 'https://go-tik.com/storage/cover/_1773939956_IMG_9883.jpeg',
+        image: `${import.meta.env.VITE_APP_URL}/storage/cover/${td.event_cover}`,
         buyer: {
           nama: td.buyer_name,
           email: td.email,
