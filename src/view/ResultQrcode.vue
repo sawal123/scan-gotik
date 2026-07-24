@@ -24,8 +24,18 @@ const ticketData = ref({
   status: '-'
 })
 
+const getInvoiceFromQuery = () => {
+  const rawInvoice = route.query.invoice
+  const invoice = Array.isArray(rawInvoice)
+    ? rawInvoice[0]
+    : rawInvoice
+
+  return typeof invoice === 'string' ? invoice.trim() : ''
+}
+
 const fetchTicketSearch = async () => {
-  const invoice = route.query.invoice
+  const invoice = getInvoiceFromQuery()
+
   if (!invoice) {
     errorMessage.value = 'Invoice tidak ditemukan'
     loading.value = false

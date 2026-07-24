@@ -5,15 +5,194 @@ import { Html5Qrcode } from 'html5-qrcode'
 
 const router = useRouter()
 const errorMsg = ref('')
+const handheldStatus = ref('Scanner handheld siap digunakan')
+const scanLocked = ref(false)
 let html5QrCode: Html5Qrcode | null = null
+let handheldBuffer = ''
+let lastKeyAt = 0
+let fastKeyCount = 0
+let bufferResetTimer: number | undefined
+let componentUnmounted = false
+
+type ScanSource = 'camera' | 'handheld'
+
+const MAX_KEY_GAP = 200
+const BUFFER_RESET_DELAY = 500
+const MINIMUM_CODE_LENGTH = 3
+const CAMERA_UNAVAILABLE_MESSAGE = 'Kamera tidak tersedia. Scanner handheld tetap dapat digunakan.'
+
+const normalizeScanValue = (rawValue: string) => {
+  const trimmedValue = rawValue.trim()
+
+  if (!trimmedValue) {
+    return ''
+  }
+
+  if (!/^https?:\/\//i.test(trimmedValue)) {
+    return trimmedValue
+  }
+
+  try {
+    const url = new URL(trimmedValue)
+    const queryValue = url.searchParams.get('invoice')
+      ?? url.searchParams.get('code')
+      ?? url.searchParams.get('ticket')
+
+    if (queryValue?.trim()) {
+      return queryValue.trim()
+    }
+
+    const lastPathSegment = url.pathname.split('/').filter(Boolean).pop()
+    return lastPathSegment ? decodeURIComponent(lastPathSegment).trim() : trimmedValue
+  } catch (err) {
+    console.error('Gagal membaca URL hasil scan:', err)
+    return trimmedValue
+  }
+}
+
+const clearBufferResetTimer = () => {
+  if (bufferResetTimer !== undefined) {
+    window.clearTimeout(bufferResetTimer)
+    bufferResetTimer = undefined
+  }
+}
+
+const resetHandheldBuffer = () => {
+  handheldBuffer = ''
+  lastKeyAt = 0
+  fastKeyCount = 0
+  clearBufferResetTimer()
+}
+
+const scheduleBufferReset = () => {
+  clearBufferResetTimer()
+  bufferResetTimer = window.setTimeout(() => {
+    resetHandheldBuffer()
+    if (!scanLocked.value) {
+      handheldStatus.value = 'Scanner handheld siap digunakan'
+    }
+  }, BUFFER_RESET_DELAY)
+}
+
+const isEditableTarget = (target: EventTarget | null) => {
+  if (!(target instanceof HTMLElement)) {
+    return false
+  }
+
+  const tagName = target.tagName.toLowerCase()
+  return target.isContentEditable || tagName === 'input' || tagName === 'textarea' || tagName === 'select'
+}
+
+const stopCamera = async () => {
+  if (!html5QrCode) {
+    return
+  }
+
+  const activeQrCode = html5QrCode
+
+  try {
+    if (activeQrCode.isScanning) {
+      await activeQrCode.stop()
+    }
+
+    activeQrCode.clear()
+  } catch (err) {
+    console.error('Gagal menghentikan kamera:', err)
+  } finally {
+    if (html5QrCode === activeQrCode) {
+      html5QrCode = null
+    }
+  }
+}
+
+const processScanResult = async (rawValue: string, source: ScanSource) => {
+  const invoice = normalizeScanValue(rawValue)
+
+  if (!invoice || scanLocked.value) {
+    return
+  }
+
+  scanLocked.value = true
+  errorMsg.value = ''
+  handheldStatus.value = source === 'handheld'
+    ? `Barcode diterima: ${invoice}`
+    : 'QR Code kamera diterima'
+
+  try {
+    await stopCamera()
+    await router.push({
+      path: '/result',
+      query: {
+        invoice,
+        source
+      }
+    })
+  } catch (err) {
+    console.error('Gagal membuka halaman hasil scan:', err)
+    scanLocked.value = false
+    handheldStatus.value = 'Scanner handheld siap digunakan'
+    errorMsg.value = 'Gagal membuka halaman hasil scan. Silakan coba scan ulang.'
+
+    if (!componentUnmounted) {
+      await startCamera()
+    }
+  }
+}
+
+const handleHandheldKeydown = (event: KeyboardEvent) => {
+  if (scanLocked.value || isEditableTarget(event.target) || event.ctrlKey || event.altKey || event.metaKey) {
+    return
+  }
+
+  if (event.key === 'Enter' || event.key === 'Tab') {
+    const now = Date.now()
+    const bufferedValue = handheldBuffer.trim()
+    const isScannerTiming = lastKeyAt > 0 && now - lastKeyAt <= MAX_KEY_GAP && fastKeyCount > 0
+
+    if (bufferedValue) {
+      event.preventDefault()
+    }
+
+    resetHandheldBuffer()
+
+    if (bufferedValue.length >= MINIMUM_CODE_LENGTH && isScannerTiming) {
+      void processScanResult(bufferedValue, 'handheld')
+    }
+
+    return
+  }
+
+  if (event.key.length !== 1) {
+    return
+  }
+
+  const now = Date.now()
+  const keyGap = lastKeyAt > 0 ? now - lastKeyAt : 0
+
+  if (lastKeyAt > 0 && keyGap > MAX_KEY_GAP) {
+    resetHandheldBuffer()
+  } else if (lastKeyAt > 0) {
+    fastKeyCount += 1
+  }
+
+  handheldBuffer += event.key
+  lastKeyAt = now
+  handheldStatus.value = 'Menerima data scanner handheld...'
+  scheduleBufferReset()
+}
 
 const startCamera = async () => {
+  if (componentUnmounted) {
+    return
+  }
+
   errorMsg.value = ''
   
   // Tunggu sampai DOM benar-benar siap
   await nextTick()
   
   try {
+    await stopCamera()
     html5QrCode = new Html5Qrcode("reader")
     
     const config = { 
@@ -27,39 +206,30 @@ const startCamera = async () => {
       { facingMode: "environment" }, // Gunakan kamera belakang
       config,
       (decodedText) => {
-        // Jika sukses scan
-        stopCamera()
-        // Kirim hasil ke halaman Result
-        router.push({ path: '/result', query: { invoice: decodedText } })
+        void processScanResult(decodedText, 'camera')
       },
       (errorMessage) => {
         // Abaikan error saat mencari (sering terjadi tiap frame)
       }
     )
     console.log("Kamera Berhasil Dimuat")
-  } catch (err: any) {
+  } catch (err) {
     console.error('Kamera gagal diakses:', err)
-    errorMsg.value = 'Kamera tidak ditemukan atau izin ditolak.'
-  }
-}
-
-const stopCamera = async () => {
-  if (html5QrCode && html5QrCode.isScanning) {
-    try {
-      await html5QrCode.stop()
-      html5QrCode.clear()
-    } catch (err) {
-      console.error("Gagal stop kamera", err)
-    }
+    errorMsg.value = CAMERA_UNAVAILABLE_MESSAGE
+    await stopCamera()
   }
 }
 
 onMounted(() => {
+  window.addEventListener('keydown', handleHandheldKeydown)
   startCamera()
 })
 
 onBeforeUnmount(() => {
-  stopCamera()
+  componentUnmounted = true
+  window.removeEventListener('keydown', handleHandheldKeydown)
+  resetHandheldBuffer()
+  void stopCamera()
 })
 </script>
 
@@ -84,12 +254,15 @@ onBeforeUnmount(() => {
            <div class="absolute top-0 left-0 right-0 h-1 bg-gotik-yellow shadow-[0_0_15px_#EAB308] animate-scan"></div>
         </div>
 
-        <p class="mt-8 text-white/70 text-sm font-medium z-30">Arahkan kamera ke QR Code</p>
+        <p class="mt-8 text-white/70 text-sm font-medium z-30">Arahkan kamera ke QR Code atau gunakan scanner handheld</p>
+        <p class="mt-3 px-4 py-2 rounded-full bg-black/70 border border-white/10 text-gotik-yellow text-xs font-semibold z-30 max-w-[320px] text-center">
+          {{ handheldStatus }}
+        </p>
       </div>
 
-      <div v-if="errorMsg" class="absolute inset-0 z-40 bg-black flex flex-col items-center justify-center p-10 text-center">
-         <p class="text-red-500 mb-6">{{ errorMsg }}</p>
-         <button @click="startCamera" class="bg-gotik-yellow text-black px-6 py-3 rounded-2xl font-bold">Coba Lagi</button>
+      <div v-if="errorMsg" class="absolute left-5 right-5 bottom-8 z-40 rounded-2xl border border-red-500/40 bg-black/90 p-4 text-center shadow-xl">
+         <p class="text-red-200 text-sm mb-4">{{ errorMsg }}</p>
+         <button @click="startCamera" class="bg-gotik-yellow text-black px-5 py-3 rounded-xl font-bold">Coba Kamera Lagi</button>
       </div>
     </main>
   </div>
