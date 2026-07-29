@@ -1,15 +1,18 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { useRouter, useRoute } from 'vue-router'
+import { useRouter } from 'vue-router'
 import api from '@/api/api'
 
 const router = useRouter()
-const route = useRoute()
 
 const loading = ref(true)
 const verifying = ref(false)
 const errorMessage = ref('')
 const successMessage = ref('')
+
+const GATE_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/
+const PENDING_GATE_TOKEN_KEY = 'pending_gate_token'
+const SCAN_DEVICE_ID_KEY = 'scan_device_id'
 
 const ticketData = ref({
   uid: '',
@@ -20,96 +23,139 @@ const ticketData = ref({
     email: '-',
     invoice: '-'
   },
-  tickets: [] as any[],
+  tickets: [] as Array<{ type: string; count: number }>,
   status: '-'
 })
 
-const getInvoiceFromQuery = () => {
-  const rawInvoice = route.query.invoice
-  const invoice = Array.isArray(rawInvoice)
-    ? rawInvoice[0]
-    : rawInvoice
+const getGateToken = () => {
+  const token = sessionStorage.getItem(PENDING_GATE_TOKEN_KEY)?.trim() ?? ''
+  return GATE_TOKEN_PATTERN.test(token) ? token : ''
+}
 
-  return typeof invoice === 'string' ? invoice.trim() : ''
+const getOrCreateScanDeviceId = () => {
+  const existing = localStorage.getItem(SCAN_DEVICE_ID_KEY)?.trim()
+  if (existing) {
+    return existing
+  }
+
+  const generated = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `web-${Date.now()}-${Math.random().toString(36).slice(2, 14)}`
+
+  localStorage.setItem(SCAN_DEVICE_ID_KEY, generated)
+  return generated
+}
+
+const apiErrorMessage = (error: any, fallback: string) => {
+  const responseMessage = error?.response?.data?.message
+  if (typeof responseMessage === 'string' && responseMessage.trim()) {
+    return responseMessage
+  }
+
+  switch (error?.response?.status) {
+    case 401:
+      return 'Sesi login telah berakhir. Silakan login kembali.'
+    case 403:
+      return 'Akun ini tidak memiliki akses ke event tiket tersebut.'
+    case 404:
+      return 'Gate token tidak valid atau tiket tidak ditemukan.'
+    case 409:
+      return 'Tiket sudah pernah digunakan.'
+    case 410:
+      return 'Aplikasi scanner tidak kompatibel. Muat ulang aplikasi versi terbaru.'
+    case 422:
+      return 'Tiket belum lunas atau status tiket tidak dapat dipindai.'
+    default:
+      return error?.response ? fallback : 'Tidak dapat terhubung ke server. Periksa koneksi internet.'
+  }
 }
 
 const fetchTicketSearch = async () => {
-  const invoice = getInvoiceFromQuery()
+  const gateToken = getGateToken()
 
-  if (!invoice) {
-    errorMessage.value = 'Invoice tidak ditemukan'
+  if (!gateToken) {
+    errorMessage.value = 'Gate token tidak ditemukan atau format QR tidak valid. Silakan scan ulang tiket terbaru.'
     loading.value = false
     return
   }
-  
+
   try {
-    const response = await api.post('/ticket/search', { invoice })
+    const response = await api.post('/ticket/search', { gate_token: gateToken })
     const result = response.data
-    
+
     if (result.success && result.data) {
       const td = result.data
       ticketData.value = {
         uid: td.uid,
         event: td.event_name,
-        image: td.cover ? `${import.meta.env.VITE_APP_URL}/storage/cover/${td.cover}` : 'https://go-tik.com/storage/cover/_1773939956_IMG_9883.jpeg',
+        image: td.cover
+          ? `${import.meta.env.VITE_APP_URL}/storage/cover/${td.cover}`
+          : 'https://go-tik.com/storage/cover/_1773939956_IMG_9883.jpeg',
         buyer: {
           nama: td.buyer_name,
           email: td.email,
           invoice: td.invoice
         },
-        tickets: td.ticket_items ? td.ticket_items.map((t: any) => ({
-          type: t.jenis_tiket,
-          count: t.qty
-        })) : [],
+        tickets: Array.isArray(td.ticket_items)
+          ? td.ticket_items.map((ticket: any) => ({
+              type: ticket.jenis_tiket,
+              count: Number(ticket.qty) || 0
+            }))
+          : [],
         status: td.status_label || (td.konfirmasi ? 'Terverifikasi' : 'Belum Terverifikasi')
       }
     } else {
-      errorMessage.value = result.message || 'Tiket tidak ditemukan'
+      errorMessage.value = result.message || 'Tiket tidak ditemukan.'
     }
   } catch (error: any) {
-    console.error('Failed to search ticket:', error)
-    const res = error.response?.data || {}
-    errorMessage.value = res.message || 'Terjadi kesalahan jaringan'
+    errorMessage.value = apiErrorMessage(error, 'Terjadi kesalahan saat mencari tiket.')
   } finally {
     loading.value = false
   }
 }
 
 const handleVerify = async () => {
-  if (!ticketData.value.uid) return
+  if (!ticketData.value.uid || verifying.value) {
+    return
+  }
+
+  const gateToken = getGateToken()
+  if (!gateToken) {
+    errorMessage.value = 'Gate token tidak tersedia. Silakan scan ulang tiket.'
+    return
+  }
+
   verifying.value = true
   errorMessage.value = ''
-  
+
   try {
-    const response = await api.post(`/ticket/confirm/${ticketData.value.uid}`, {
-      invoice: ticketData.value.buyer.invoice
+    const response = await api.post('/ticket/confirm', {
+      gate_token: gateToken,
+      scan_device_id: getOrCreateScanDeviceId()
     })
     const result = response.data
-    
+
     if (result.success) {
-      successMessage.value = result.message || 'Check-in Berhasil! Selamat datang.'
+      successMessage.value = result.message || 'Check-in berhasil.'
       ticketData.value.status = 'Terverifikasi'
+      sessionStorage.removeItem(PENDING_GATE_TOKEN_KEY)
     } else {
-      errorMessage.value = result.message || 'Gagal melakukan verifikasi'
+      errorMessage.value = result.message || 'Gagal melakukan verifikasi.'
     }
   } catch (error: any) {
-    console.error('Failed to verify ticket:', error)
-    const res = error.response?.data || {}
-    errorMessage.value = res.message || 'Terjadi kesalahan saat verifikasi'
+    errorMessage.value = apiErrorMessage(error, 'Terjadi kesalahan saat melakukan check-in.')
   } finally {
     verifying.value = false
   }
 }
 
 onMounted(() => {
-  fetchTicketSearch()
+  void fetchTicketSearch()
 })
 </script>
 
 <template>
   <div class="min-h-screen bg-[var(--color-gotik-dark)] text-white flex flex-col font-sans max-w-[480px] mx-auto relative border-x border-[#1a1a1a]">
-    
-    <!-- Header -->
     <header class="flex items-center justify-between sticky top-0 z-50 bg-[var(--color-gotik-dark)] px-5 pt-6 pb-4 mb-2 relative">
       <button @click="router.back()" class="text-[#bbb] hover:text-white transition z-10 w-10 h-10 flex items-center justify-center cursor-pointer">
         <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" class="currentColor" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -117,58 +163,47 @@ onMounted(() => {
           <path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5v1.5"/>
         </svg>
       </button>
-      <h1 class="text-[17px] font-bold absolute w-full text-center left-0 pointer-events-none tracking-wide text-white">Result Qrcode</h1>
+      <h1 class="text-[17px] font-bold absolute w-full text-center left-0 pointer-events-none tracking-wide text-white">Hasil Scan</h1>
       <div class="w-10"></div>
     </header>
 
-    <!-- Main Content -->
     <main class="px-5 pb-10 flex-1 relative flex flex-col">
-      
-      <!-- Loading State -->
       <div v-if="loading" class="flex-1 flex flex-col items-center justify-center animate-pulse mt-10">
         <div class="inline-block w-10 h-10 rounded-full border-4 border-t-[var(--color-gotik-yellow)] border-gray-700 animate-spin mb-4"></div>
         <p class="text-gray-400">Mencari Tiket...</p>
       </div>
-      
-      <!-- Error State -->
+
       <div v-else-if="errorMessage && !ticketData.uid" class="flex-1 flex flex-col items-center justify-center animate-fade-in mt-10">
         <div class="bg-[#111] border border-gray-800 rounded-2xl p-6 text-center shadow-lg w-full max-w-[320px]">
           <svg class="w-16 h-16 mx-auto text-red-500 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
           </svg>
           <p class="text-white font-medium mb-4">{{ errorMessage }}</p>
-          <button @click="router.back()" class="bg-gray-800 text-white px-6 py-2 rounded-xl text-sm font-bold hover:bg-gray-700 transition">Kembali</button>
+          <button @click="router.push('/scan')" class="bg-gray-800 text-white px-6 py-2 rounded-xl text-sm font-bold hover:bg-gray-700 transition">Scan Ulang</button>
         </div>
       </div>
 
-      <!-- Card -->
       <div v-if="!loading && ticketData.uid" class="rounded-[24px] border border-gray-600/80 bg-black overflow-hidden relative shadow-lg mt-2 mb-10 shrink-0 animate-fade-in">
-        
-        <!-- Image Cover -->
         <div class="h-[180px] w-full relative overflow-hidden bg-gray-900 border-b border-gray-800">
           <img :src="ticketData.image" alt="Event Cover" class="absolute top-0 left-0 w-full h-full object-cover select-none" />
         </div>
-        
-        <!-- Details Body -->
+
         <div class="pt-5 pb-8 px-5 bg-[#0a0a0a]">
           <h3 class="text-[17px] font-bold mb-6 tracking-wide text-white">{{ ticketData.event }}</h3>
-          
-          <!-- Buyer Info -->
+
           <div class="grid grid-cols-[110px_1fr] gap-y-2 mb-8 text-[15px]">
             <div class="text-gray-200 font-normal">Nama</div>
             <div class="text-gray-200">{{ ticketData.buyer.nama }}</div>
-            
+
             <div class="text-gray-200 font-normal">Email</div>
             <div class="text-gray-200">{{ ticketData.buyer.email }}</div>
-            
+
             <div class="text-gray-200 font-normal">Invoice</div>
             <div class="text-gray-200">{{ ticketData.buyer.invoice }}</div>
           </div>
-          
-          <!-- Ticket Subtitle -->
+
           <h4 class="text-[15px] font-bold mb-4 text-white">Ticket</h4>
-          
-          <!-- Ticket Types -->
+
           <div class="grid grid-cols-[140px_30px_1fr] gap-y-2 mb-10 text-[15px]">
             <template v-for="(ticket, idx) in ticketData.tickets" :key="idx">
               <div class="text-gray-200 font-normal">{{ ticket.type }}</div>
@@ -176,19 +211,21 @@ onMounted(() => {
               <div class="text-gray-200">Ticket</div>
             </template>
           </div>
-          
-          <!-- Status -->
+
           <div class="flex justify-between items-center text-[16px]">
             <span class="text-white font-bold">Status</span>
             <span class="text-[var(--color-gotik-yellow)] font-bold tracking-wide">{{ ticketData.status }}</span>
           </div>
-          
         </div>
       </div>
 
-      <!-- Action Button (Verifikasi) -->
       <div v-if="!loading && ticketData.uid" class="mt-auto pt-4 flex shrink-0 animate-fade-in">
-        <button v-if="ticketData.status !== 'Terverifikasi'" @click="handleVerify" :disabled="verifying" class="w-full bg-[var(--color-gotik-yellow)] text-black font-bold text-[18px] py-4 rounded-[14px] hover:opacity-90 transition shadow-sm flex items-center justify-center gap-2">
+        <button
+          v-if="ticketData.status !== 'Terverifikasi'"
+          @click="handleVerify"
+          :disabled="verifying"
+          class="w-full bg-[var(--color-gotik-yellow)] text-black font-bold text-[18px] py-4 rounded-[14px] hover:opacity-90 transition shadow-sm flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
+        >
           <span v-if="verifying" class="inline-block w-5 h-5 border-[2.5px] border-t-black border-black/30 rounded-full animate-spin"></span>
           {{ verifying ? 'Memverifikasi...' : 'Verifikasi' }}
         </button>
@@ -196,13 +233,11 @@ onMounted(() => {
           Sudah Terverifikasi
         </button>
       </div>
-      
-      <!-- General Error Fallback for Verify failures (overlay/card bottom) -->
+
       <div v-if="errorMessage && ticketData.uid" class="mt-4 p-3 bg-red-900/30 border border-red-500/50 rounded-xl text-red-200 text-sm text-center animate-fade-in">
         {{ errorMessage }}
       </div>
 
-      <!-- Success Modal Overlay -->
       <div v-if="successMessage" class="fixed inset-0 z-[100] flex items-center justify-center bg-black/85 px-5 backdrop-blur-sm animate-fade-in pointer-events-auto">
         <div class="bg-[#111] border border-[var(--color-gotik-yellow)] w-full max-w-[340px] rounded-[24px] p-6 text-center relative shadow-[0_0_40px_rgba(255,215,0,0.15)] flex flex-col items-center transform transition-transform">
           <div class="w-24 h-24 bg-[var(--color-gotik-yellow)] rounded-full flex items-center justify-center text-black mb-5 shadow-lg relative animate-[bounce_1s_ease-out]">
@@ -220,7 +255,6 @@ onMounted(() => {
         </div>
       </div>
     </main>
-
   </div>
 </template>
 

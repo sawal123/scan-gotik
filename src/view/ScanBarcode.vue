@@ -20,6 +20,9 @@ const MAX_KEY_GAP = 200
 const BUFFER_RESET_DELAY = 500
 const MINIMUM_CODE_LENGTH = 3
 const CAMERA_UNAVAILABLE_MESSAGE = 'Kamera tidak tersedia. Scanner handheld tetap dapat digunakan.'
+const GATE_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/
+const PENDING_GATE_TOKEN_KEY = 'pending_gate_token'
+const PENDING_SCAN_SOURCE_KEY = 'pending_scan_source'
 
 const normalizeScanValue = (rawValue: string) => {
   const trimmedValue = rawValue.trim()
@@ -34,7 +37,8 @@ const normalizeScanValue = (rawValue: string) => {
 
   try {
     const url = new URL(trimmedValue)
-    const queryValue = url.searchParams.get('invoice')
+    const queryValue = url.searchParams.get('gate_token')
+      ?? url.searchParams.get('token')
       ?? url.searchParams.get('code')
       ?? url.searchParams.get('ticket')
 
@@ -44,8 +48,7 @@ const normalizeScanValue = (rawValue: string) => {
 
     const lastPathSegment = url.pathname.split('/').filter(Boolean).pop()
     return lastPathSegment ? decodeURIComponent(lastPathSegment).trim() : trimmedValue
-  } catch (err) {
-    console.error('Gagal membaca URL hasil scan:', err)
+  } catch {
     return trimmedValue
   }
 }
@@ -96,8 +99,8 @@ const stopCamera = async () => {
     }
 
     activeQrCode.clear()
-  } catch (err) {
-    console.error('Gagal menghentikan kamera:', err)
+  } catch {
+    // Kamera mungkin sudah berhenti ketika komponen berpindah halaman.
   } finally {
     if (html5QrCode === activeQrCode) {
       html5QrCode = null
@@ -105,30 +108,47 @@ const stopCamera = async () => {
   }
 }
 
-const processScanResult = async (rawValue: string, source: ScanSource) => {
-  const invoice = normalizeScanValue(rawValue)
+const releaseInvalidScanLock = () => {
+  window.setTimeout(() => {
+    if (componentUnmounted) {
+      return
+    }
 
-  if (!invoice || scanLocked.value) {
+    scanLocked.value = false
+    handheldStatus.value = 'Scanner handheld siap digunakan'
+  }, 1500)
+}
+
+const processScanResult = async (rawValue: string, source: ScanSource) => {
+  const gateToken = normalizeScanValue(rawValue)
+
+  if (!gateToken || scanLocked.value) {
+    return
+  }
+
+  if (!GATE_TOKEN_PATTERN.test(gateToken)) {
+    scanLocked.value = true
+    errorMsg.value = 'QR tiket lama atau tidak valid. Gunakan tiket terbaru yang berisi gate token.'
+    handheldStatus.value = 'Barcode ditolak: format tidak valid'
+    releaseInvalidScanLock()
     return
   }
 
   scanLocked.value = true
   errorMsg.value = ''
   handheldStatus.value = source === 'handheld'
-    ? `Barcode diterima: ${invoice}`
+    ? 'Barcode handheld diterima'
     : 'QR Code kamera diterima'
 
   try {
+    sessionStorage.setItem(PENDING_GATE_TOKEN_KEY, gateToken)
+    sessionStorage.setItem(PENDING_SCAN_SOURCE_KEY, source)
+
     await stopCamera()
-    await router.push({
-      path: '/result',
-      query: {
-        invoice,
-        source
-      }
-    })
-  } catch (err) {
-    console.error('Gagal membuka halaman hasil scan:', err)
+    await router.push({ path: '/result' })
+  } catch {
+    sessionStorage.removeItem(PENDING_GATE_TOKEN_KEY)
+    sessionStorage.removeItem(PENDING_SCAN_SOURCE_KEY)
     scanLocked.value = false
     handheldStatus.value = 'Scanner handheld siap digunakan'
     errorMsg.value = 'Gagal membuka halaman hasil scan. Silakan coba scan ulang.'
@@ -187,34 +207,30 @@ const startCamera = async () => {
   }
 
   errorMsg.value = ''
-  
-  // Tunggu sampai DOM benar-benar siap
+
   await nextTick()
-  
+
   try {
     await stopCamera()
-    html5QrCode = new Html5Qrcode("reader")
-    
-    const config = { 
-      fps: 10, 
+    html5QrCode = new Html5Qrcode('reader')
+
+    const config = {
+      fps: 10,
       qrbox: { width: 250, height: 250 },
-      // Penting: aspectRatio 1.0 agar pas di kotak scanner
-      aspectRatio: 1.0 
+      aspectRatio: 1.0
     }
 
     await html5QrCode.start(
-      { facingMode: "environment" }, // Gunakan kamera belakang
+      { facingMode: 'environment' },
       config,
       (decodedText) => {
         void processScanResult(decodedText, 'camera')
       },
-      (errorMessage) => {
-        // Abaikan error saat mencari (sering terjadi tiap frame)
+      () => {
+        // Error pencarian per frame memang normal dan tidak perlu ditampilkan.
       }
     )
-    console.log("Kamera Berhasil Dimuat")
-  } catch (err) {
-    console.error('Kamera gagal diakses:', err)
+  } catch {
     errorMsg.value = CAMERA_UNAVAILABLE_MESSAGE
     await stopCamera()
   }
@@ -222,7 +238,7 @@ const startCamera = async () => {
 
 onMounted(() => {
   window.addEventListener('keydown', handleHandheldKeydown)
-  startCamera()
+  void startCamera()
 })
 
 onBeforeUnmount(() => {
@@ -235,7 +251,6 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="min-h-screen bg-black text-white flex flex-col max-w-md mx-auto relative overflow-hidden">
-    
     <header class="p-6 flex items-center z-50">
       <button @click="router.back()" class="p-2 bg-gray-900/50 rounded-xl">
         <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M15 19l-7-7 7-7" stroke-width="2" stroke-linecap="round"/></svg>
@@ -244,14 +259,13 @@ onBeforeUnmount(() => {
     </header>
 
     <main class="flex-1 relative flex flex-col items-center justify-center">
-      
       <div id="reader" class="absolute inset-0 w-full h-full object-cover"></div>
-      
+
       <div class="absolute z-20 pointer-events-none flex flex-col items-center justify-center inset-0">
         <div class="absolute inset-0 bg-black/40"></div>
-        
+
         <div class="w-64 h-64 border-2 border-white/50 rounded-[40px] relative z-30 overflow-hidden bg-transparent shadow-[0_0_0_1000px_rgba(0,0,0,0.4)]">
-           <div class="absolute top-0 left-0 right-0 h-1 bg-gotik-yellow shadow-[0_0_15px_#EAB308] animate-scan"></div>
+          <div class="absolute top-0 left-0 right-0 h-1 bg-gotik-yellow shadow-[0_0_15px_#EAB308] animate-scan"></div>
         </div>
 
         <p class="mt-8 text-white/70 text-sm font-medium z-30">Arahkan kamera ke QR Code atau gunakan scanner handheld</p>
@@ -261,8 +275,8 @@ onBeforeUnmount(() => {
       </div>
 
       <div v-if="errorMsg" class="absolute left-5 right-5 bottom-8 z-40 rounded-2xl border border-red-500/40 bg-black/90 p-4 text-center shadow-xl">
-         <p class="text-red-200 text-sm mb-4">{{ errorMsg }}</p>
-         <button @click="startCamera" class="bg-gotik-yellow text-black px-5 py-3 rounded-xl font-bold">Coba Kamera Lagi</button>
+        <p class="text-red-200 text-sm mb-4">{{ errorMsg }}</p>
+        <button @click="startCamera" class="bg-gotik-yellow text-black px-5 py-3 rounded-xl font-bold">Coba Kamera Lagi</button>
       </div>
     </main>
   </div>
@@ -278,7 +292,6 @@ onBeforeUnmount(() => {
   100% { top: 0%; }
 }
 
-/* CSS untuk memaksa video memenuhi layar */
 :deep(#reader) video {
   width: 100% !important;
   height: 100% !important;
