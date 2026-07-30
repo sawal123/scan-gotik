@@ -95,7 +95,7 @@ const manualCodeError = ref('')
  * The result is written back to manualCode so the input field stays in sync.
  */
 const normaliseManualCode = (raw: string): string =>
-  raw.toUpperCase().replace(/[\s-]/g, '')
+  raw.toUpperCase().replace(/[\s-]/g, '').slice(0, 8)
 
 const onManualCodeInput = (event: Event) => {
   const target = event.target as HTMLInputElement
@@ -129,6 +129,8 @@ const handleManualSubmit = () => {
   }
 
   // Store credentials in sessionStorage – never put them in the URL
+  // Clear any stale QR gate token so the old token is never reused
+  sessionStorage.removeItem('pending_gate_token')
   sessionStorage.setItem(PENDING_MANUAL_CODE_KEY, code)
   sessionStorage.setItem(PENDING_MANUAL_EVENT_UID_KEY, eventData.value.uid)
 
@@ -318,7 +320,6 @@ const fetchVerifiedUsers = async (uid: string) => {
             autocorrect="off"
             autocapitalize="characters"
             spellcheck="false"
-            maxlength="8"
             class="w-full bg-[#1c1c1e] text-center text-gray-200 placeholder-gray-400 rounded-[12px] py-4 border border-gray-800 focus:outline-none focus:border-gray-500 transition-colors text-[18px] font-mono tracking-[0.25em]"
             :class="{ 'border-red-500/70': manualCodeError }"
             placeholder="XXXXXXXX"

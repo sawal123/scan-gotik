@@ -86,6 +86,8 @@ const apiErrorMessage = (error: any, fallback: string): string => {
       return 'Kode tidak valid atau tiket tidak ditemukan.'
     case 409:
       return 'Tiket sudah pernah digunakan.'
+    case 410:
+      return 'Aplikasi scanner tidak kompatibel. Muat ulang aplikasi versi terbaru.'
     case 422:
       return 'Tiket belum lunas atau status tiket tidak dapat dipindai.'
     case 429:
