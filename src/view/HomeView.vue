@@ -32,7 +32,6 @@ const fetchEventData = async () => {
   try {
     const response = await api.get('/listEvent')
     const result = response.data
-    // console.log(result)
     if (result.success && result.data && result.data.length > 0) {
       const eV = result.data[0]
       eventData.value = {
@@ -48,7 +47,7 @@ const fetchEventData = async () => {
     console.error('Fetch event error:', error)
   }
 }
-// console.log(eventData.value.uid)
+
 const currentUser = ref({
   name: 'User',
   avatar: '',
@@ -64,7 +63,6 @@ const loadUserFromStorage = () => {
       
       currentUser.value = {
         name: user.name || 'User',
-        // Jika ada gambar, arahkan ke path storage Laravel, jika tidak kosongkan
         avatar: user.gambar && user.gambar !== 'null' 
                 ? `${import.meta.env.VITE_APP_URL}/storage/user/${user.gambar}` 
                 : '',
@@ -74,20 +72,81 @@ const loadUserFromStorage = () => {
       console.error('Gagal parse user data', e)
     }
   } else {
-    // Fallback jika data tidak ditemukan di storage
     currentUser.value = { name: 'User', avatar: '', initials: 'U' }
   }
 }
 
 onMounted(() => {
   loadUserFromStorage()
-  // console.log(currentUser.value)
   fetchEventData()
 })
 
-const showInputModal = ref(false)
-const invoiceCode = ref('')
+// ─── Manual Code Input ────────────────────────────────────────────────────────
+const ALLOWED_CHARS = /^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}$/
+const PENDING_MANUAL_CODE_KEY = 'pending_manual_code'
+const PENDING_MANUAL_EVENT_UID_KEY = 'pending_manual_event_uid'
 
+const showInputModal = ref(false)
+const manualCode = ref('')
+const manualCodeError = ref('')
+
+/**
+ * Normalise raw input: uppercase, strip spaces and dashes.
+ * The result is written back to manualCode so the input field stays in sync.
+ */
+const normaliseManualCode = (raw: string): string =>
+  raw.toUpperCase().replace(/[\s-]/g, '')
+
+const onManualCodeInput = (event: Event) => {
+  const target = event.target as HTMLInputElement
+  const normalised = normaliseManualCode(target.value)
+  manualCode.value = normalised
+  // keep cursor at end after value is replaced programmatically
+  target.value = normalised
+  manualCodeError.value = ''
+}
+
+const validateManualCode = (code: string): string => {
+  if (code.length === 0) return 'Kode tidak boleh kosong.'
+  if (code.length !== 8) return `Kode harus tepat 8 karakter (sekarang ${code.length} karakter).`
+  if (!ALLOWED_CHARS.test(code)) return 'Kode mengandung karakter yang tidak diizinkan.'
+  return ''
+}
+
+const handleManualSubmit = () => {
+  const code = normaliseManualCode(manualCode.value)
+  manualCode.value = code
+
+  const err = validateManualCode(code)
+  if (err) {
+    manualCodeError.value = err
+    return
+  }
+
+  if (!eventData.value.uid) {
+    manualCodeError.value = 'Data event belum siap. Coba lagi sebentar.'
+    return
+  }
+
+  // Store credentials in sessionStorage – never put them in the URL
+  sessionStorage.setItem(PENDING_MANUAL_CODE_KEY, code)
+  sessionStorage.setItem(PENDING_MANUAL_EVENT_UID_KEY, eventData.value.uid)
+
+  // Clear the input field before navigating
+  manualCode.value = ''
+  manualCodeError.value = ''
+  showInputModal.value = false
+
+  router.push({ path: '/result' })
+}
+
+const handleModalClose = () => {
+  manualCode.value = ''
+  manualCodeError.value = ''
+  showInputModal.value = false
+}
+
+// ─── Verified Users ───────────────────────────────────────────────────────────
 const verifiedUsers = ref<any[]>([])
 
 const fetchVerifiedUsers = async (uid: string) => {
@@ -232,24 +291,53 @@ const fetchVerifiedUsers = async (uid: string) => {
     
     </main>
 
-    <!-- Modal Input Code -->
+    <!-- Modal Input Manual Code -->
     <div v-if="showInputModal" class="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 px-5 backdrop-blur-[2px]">
       <div class="bg-[#111] border border-gray-700 w-full max-w-[340px] rounded-[18px] p-5 relative shadow-2xl">
         <!-- Close Button -->
-        <button @click="showInputModal = false" class="absolute top-3 right-3 text-gray-300 hover:text-white transition bg-[#2a2a2a] rounded-full p-[3px] border border-gray-500">
+        <button @click="handleModalClose" class="absolute top-3 right-3 text-gray-300 hover:text-white transition bg-[#2a2a2a] rounded-full p-[3px] border border-gray-500">
           <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" class="currentColor" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
             <line x1="18" y1="6" x2="6" y2="18"></line>
             <line x1="6" y1="6" x2="18" y2="18"></line>
           </svg>
         </button>
+
+        <!-- Title -->
+        <h3 class="text-[15px] font-bold mb-1 text-white">Input Kode Manual</h3>
+        <p class="text-[12px] text-gray-400 mb-4">Masukkan kode 8 karakter dari tiket.</p>
         
         <!-- Input Field -->
-        <div class="mt-5 mb-4">
-          <input v-model="invoiceCode" type="text" class="w-full bg-[#1c1c1e] text-center text-gray-200 placeholder-gray-400 rounded-[12px] py-4 border border-gray-800 focus:outline-none focus:border-gray-500 transition-colors text-[15px]" placeholder="Input code" />
+        <div class="mt-1 mb-2">
+          <input
+            :value="manualCode"
+            @input="onManualCodeInput"
+            @keydown.enter="handleManualSubmit"
+            type="text"
+            id="manual-code-input"
+            autocomplete="off"
+            autocorrect="off"
+            autocapitalize="characters"
+            spellcheck="false"
+            maxlength="8"
+            class="w-full bg-[#1c1c1e] text-center text-gray-200 placeholder-gray-400 rounded-[12px] py-4 border border-gray-800 focus:outline-none focus:border-gray-500 transition-colors text-[18px] font-mono tracking-[0.25em]"
+            :class="{ 'border-red-500/70': manualCodeError }"
+            placeholder="XXXXXXXX"
+          />
+        </div>
+
+        <!-- Character counter -->
+        <div class="flex justify-between items-center mb-4">
+          <p v-if="manualCodeError" class="text-red-400 text-[12px]">{{ manualCodeError }}</p>
+          <p v-else class="text-gray-500 text-[12px]">Karakter yang diizinkan: A-Z, 0-9 (kecuali 0, 1, I, O)</p>
+          <span class="text-gray-500 text-[12px] ml-auto shrink-0">{{ manualCode.length }}/8</span>
         </div>
         
         <!-- Submit Button -->
-        <button @click="router.push({ path: '/result', query: { invoice: invoiceCode, event_uid: eventData.uid } }); showInputModal = false" class="w-full bg-[var(--color-gotik-yellow)] text-black font-bold text-[15px] py-3.5 rounded-[12px] hover:opacity-90 transition shadow-sm">
+        <button
+          @click="handleManualSubmit"
+          :disabled="manualCode.length !== 8"
+          class="w-full bg-[var(--color-gotik-yellow)] text-black font-bold text-[15px] py-3.5 rounded-[12px] hover:opacity-90 transition shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
+        >
           Submit
         </button>
       </div>
