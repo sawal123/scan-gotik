@@ -10,10 +10,40 @@ const verifying = ref(false)
 const errorMessage = ref('')
 const successMessage = ref('')
 
+// ─── Session / device keys ────────────────────────────────────────────────────
 const GATE_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/
+const MANUAL_CODE_PATTERN = /^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}$/
+
 const PENDING_GATE_TOKEN_KEY = 'pending_gate_token'
+const PENDING_MANUAL_CODE_KEY = 'pending_manual_code'
+const PENDING_MANUAL_EVENT_UID_KEY = 'pending_manual_event_uid'
 const SCAN_DEVICE_ID_KEY = 'scan_device_id'
 
+// ─── Mode detection ───────────────────────────────────────────────────────────
+type ScanMode = 'qr' | 'manual' | 'unknown'
+
+const scanMode = ref<ScanMode>('unknown')
+
+const getGateToken = (): string => {
+  const token = sessionStorage.getItem(PENDING_GATE_TOKEN_KEY)?.trim() ?? ''
+  return GATE_TOKEN_PATTERN.test(token) ? token : ''
+}
+
+const getManualCode = (): string => {
+  const code = sessionStorage.getItem(PENDING_MANUAL_CODE_KEY)?.trim() ?? ''
+  return MANUAL_CODE_PATTERN.test(code) ? code : ''
+}
+
+const getManualEventUid = (): string =>
+  sessionStorage.getItem(PENDING_MANUAL_EVENT_UID_KEY)?.trim() ?? ''
+
+const detectMode = (): ScanMode => {
+  if (getGateToken()) return 'qr'
+  if (getManualCode() && getManualEventUid()) return 'manual'
+  return 'unknown'
+}
+
+// ─── Ticket data ──────────────────────────────────────────────────────────────
 const ticketData = ref({
   uid: '',
   event: 'Memuat...',
@@ -27,26 +57,21 @@ const ticketData = ref({
   status: '-'
 })
 
-const getGateToken = () => {
-  const token = sessionStorage.getItem(PENDING_GATE_TOKEN_KEY)?.trim() ?? ''
-  return GATE_TOKEN_PATTERN.test(token) ? token : ''
-}
-
-const getOrCreateScanDeviceId = () => {
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+const getOrCreateScanDeviceId = (): string => {
   const existing = localStorage.getItem(SCAN_DEVICE_ID_KEY)?.trim()
-  if (existing) {
-    return existing
-  }
+  if (existing) return existing
 
-  const generated = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-    ? crypto.randomUUID()
-    : `web-${Date.now()}-${Math.random().toString(36).slice(2, 14)}`
+  const generated =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `web-${Date.now()}-${Math.random().toString(36).slice(2, 14)}`
 
   localStorage.setItem(SCAN_DEVICE_ID_KEY, generated)
   return generated
 }
 
-const apiErrorMessage = (error: any, fallback: string) => {
+const apiErrorMessage = (error: any, fallback: string): string => {
   const responseMessage = error?.response?.data?.message
   if (typeof responseMessage === 'string' && responseMessage.trim()) {
     return responseMessage
@@ -58,23 +83,57 @@ const apiErrorMessage = (error: any, fallback: string) => {
     case 403:
       return 'Akun ini tidak memiliki akses ke event tiket tersebut.'
     case 404:
-      return 'Gate token tidak valid atau tiket tidak ditemukan.'
+      return 'Kode tidak valid atau tiket tidak ditemukan.'
     case 409:
       return 'Tiket sudah pernah digunakan.'
     case 410:
       return 'Aplikasi scanner tidak kompatibel. Muat ulang aplikasi versi terbaru.'
     case 422:
       return 'Tiket belum lunas atau status tiket tidak dapat dipindai.'
+    case 429:
+      return 'Terlalu banyak permintaan. Tunggu sebentar lalu coba lagi.'
     default:
-      return error?.response ? fallback : 'Tidak dapat terhubung ke server. Periksa koneksi internet.'
+      return error?.response
+        ? fallback
+        : 'Tidak dapat terhubung ke server. Periksa koneksi internet.'
   }
 }
 
-const fetchTicketSearch = async () => {
+const clearSessionCredentials = () => {
+  sessionStorage.removeItem(PENDING_GATE_TOKEN_KEY)
+  sessionStorage.removeItem(PENDING_MANUAL_CODE_KEY)
+  sessionStorage.removeItem(PENDING_MANUAL_EVENT_UID_KEY)
+}
+
+const mapTicketResponse = (td: any) => {
+  ticketData.value = {
+    uid: td.uid,
+    event: td.event_name,
+    image: td.cover
+      ? `${import.meta.env.VITE_APP_URL}/storage/cover/${td.cover}`
+      : 'https://go-tik.com/storage/cover/_1773939956_IMG_9883.jpeg',
+    buyer: {
+      nama: td.buyer_name,
+      email: td.email,
+      invoice: td.invoice
+    },
+    tickets: Array.isArray(td.ticket_items)
+      ? td.ticket_items.map((ticket: any) => ({
+          type: ticket.jenis_tiket,
+          count: Number(ticket.qty) || 0
+        }))
+      : [],
+    status: td.status_label || (td.konfirmasi ? 'Terverifikasi' : 'Belum Terverifikasi')
+  }
+}
+
+// ─── QR / handheld mode ───────────────────────────────────────────────────────
+const fetchQrTicket = async () => {
   const gateToken = getGateToken()
 
   if (!gateToken) {
-    errorMessage.value = 'Gate token tidak ditemukan atau format QR tidak valid. Silakan scan ulang tiket terbaru.'
+    errorMessage.value =
+      'Gate token tidak ditemukan atau format QR tidak valid. Silakan scan ulang tiket terbaru.'
     loading.value = false
     return
   }
@@ -84,26 +143,7 @@ const fetchTicketSearch = async () => {
     const result = response.data
 
     if (result.success && result.data) {
-      const td = result.data
-      ticketData.value = {
-        uid: td.uid,
-        event: td.event_name,
-        image: td.cover
-          ? `${import.meta.env.VITE_APP_URL}/storage/cover/${td.cover}`
-          : 'https://go-tik.com/storage/cover/_1773939956_IMG_9883.jpeg',
-        buyer: {
-          nama: td.buyer_name,
-          email: td.email,
-          invoice: td.invoice
-        },
-        tickets: Array.isArray(td.ticket_items)
-          ? td.ticket_items.map((ticket: any) => ({
-              type: ticket.jenis_tiket,
-              count: Number(ticket.qty) || 0
-            }))
-          : [],
-        status: td.status_label || (td.konfirmasi ? 'Terverifikasi' : 'Belum Terverifikasi')
-      }
+      mapTicketResponse(result.data)
     } else {
       errorMessage.value = result.message || 'Tiket tidak ditemukan.'
     }
@@ -114,19 +154,12 @@ const fetchTicketSearch = async () => {
   }
 }
 
-const handleVerify = async () => {
-  if (!ticketData.value.uid || verifying.value) {
-    return
-  }
-
+const verifyQrTicket = async () => {
   const gateToken = getGateToken()
   if (!gateToken) {
     errorMessage.value = 'Gate token tidak tersedia. Silakan scan ulang tiket.'
     return
   }
-
-  verifying.value = true
-  errorMessage.value = ''
 
   try {
     const response = await api.post('/ticket/confirm', {
@@ -138,15 +171,113 @@ const handleVerify = async () => {
     if (result.success) {
       successMessage.value = result.message || 'Check-in berhasil.'
       ticketData.value.status = 'Terverifikasi'
-      sessionStorage.removeItem(PENDING_GATE_TOKEN_KEY)
+      clearSessionCredentials()
     } else {
       errorMessage.value = result.message || 'Gagal melakukan verifikasi.'
     }
   } catch (error: any) {
     errorMessage.value = apiErrorMessage(error, 'Terjadi kesalahan saat melakukan check-in.')
+  }
+}
+
+// ─── Manual code mode ─────────────────────────────────────────────────────────
+const fetchManualTicket = async () => {
+  const manualCode = getManualCode()
+  const eventUid = getManualEventUid()
+
+  if (!manualCode || !eventUid) {
+    errorMessage.value =
+      'Kode manual atau event tidak ditemukan. Silakan kembali dan masukkan kode ulang.'
+    loading.value = false
+    return
+  }
+
+  try {
+    const response = await api.post('/ticket/manual/search', {
+      manual_code: manualCode,
+      event_uid: eventUid
+    })
+    const result = response.data
+
+    if (result.success && result.data) {
+      mapTicketResponse(result.data)
+    } else {
+      errorMessage.value = result.message || 'Tiket tidak ditemukan.'
+    }
+  } catch (error: any) {
+    errorMessage.value = apiErrorMessage(error, 'Terjadi kesalahan saat mencari tiket.')
+  } finally {
+    loading.value = false
+  }
+}
+
+const verifyManualTicket = async () => {
+  const manualCode = getManualCode()
+  const eventUid = getManualEventUid()
+
+  if (!manualCode || !eventUid) {
+    errorMessage.value = 'Kode manual tidak tersedia. Silakan kembali dan masukkan kode ulang.'
+    return
+  }
+
+  try {
+    const response = await api.post('/ticket/manual/confirm', {
+      manual_code: manualCode,
+      event_uid: eventUid,
+      scan_device_id: getOrCreateScanDeviceId()
+    })
+    const result = response.data
+
+    if (result.success) {
+      successMessage.value = result.message || 'Check-in berhasil.'
+      ticketData.value.status = 'Terverifikasi'
+      clearSessionCredentials()
+    } else {
+      errorMessage.value = result.message || 'Gagal melakukan verifikasi.'
+    }
+  } catch (error: any) {
+    errorMessage.value = apiErrorMessage(error, 'Terjadi kesalahan saat melakukan check-in.')
+  }
+}
+
+// ─── Unified entry points ─────────────────────────────────────────────────────
+const fetchTicketSearch = async () => {
+  const mode = detectMode()
+  scanMode.value = mode
+
+  if (mode === 'qr') {
+    await fetchQrTicket()
+  } else if (mode === 'manual') {
+    await fetchManualTicket()
+  } else {
+    errorMessage.value =
+      'Tidak ada data tiket yang ditemukan. Silakan scan ulang atau masukkan kode manual.'
+    loading.value = false
+  }
+}
+
+const handleVerify = async () => {
+  // Guard: prevent double-submit
+  if (!ticketData.value.uid || verifying.value) return
+
+  verifying.value = true
+  errorMessage.value = ''
+
+  try {
+    if (scanMode.value === 'manual') {
+      await verifyManualTicket()
+    } else {
+      await verifyQrTicket()
+    }
   } finally {
     verifying.value = false
   }
+}
+
+const handleBack = () => {
+  // Clean up any pending credentials when user cancels the flow
+  clearSessionCredentials()
+  router.back()
 }
 
 onMounted(() => {
@@ -157,7 +288,7 @@ onMounted(() => {
 <template>
   <div class="min-h-screen bg-[var(--color-gotik-dark)] text-white flex flex-col font-sans max-w-[480px] mx-auto relative border-x border-[#1a1a1a]">
     <header class="flex items-center justify-between sticky top-0 z-50 bg-[var(--color-gotik-dark)] px-5 pt-6 pb-4 mb-2 relative">
-      <button @click="router.back()" class="text-[#bbb] hover:text-white transition z-10 w-10 h-10 flex items-center justify-center cursor-pointer">
+      <button @click="handleBack" class="text-[#bbb] hover:text-white transition z-10 w-10 h-10 flex items-center justify-center cursor-pointer">
         <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" class="currentColor" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
           <path d="M9 14 4 9l5-5"/>
           <path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5v1.5"/>
